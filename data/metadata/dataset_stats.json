@@ -1,0 +1,102 @@
+{
+  "train": {
+    "total_samples": 45045,
+    "pu_distribution": {
+      "idle": 9847,
+      "active": 35198
+    },
+    "mod_distribution": {
+      "BPSK": 26576,
+      "QPSK": 18469,
+      "8PSK": 0,
+      "16QAM": 0,
+      "DQPSK": 0
+    },
+    "snr_distribution": {
+      "4dB": 20,
+      "6dB": 5085,
+      "8dB": 11242,
+      "10dB": 8667,
+      "12dB": 17290,
+      "14dB": 2552,
+      "16dB": 182,
+      "18dB": 6,
+      "20dB": 1
+    },
+    "psd_stats": {
+      "mean": 7.402152846225363e-07,
+      "std": 0.9999920725822449,
+      "min": -10.0,
+      "max": 5.5399250984191895
+    }
+  },
+  "val": {
+    "total_samples": 9652,
+    "pu_distribution": {
+      "idle": 2145,
+      "active": 7507
+    },
+    "mod_distribution": {
+      "BPSK": 5659,
+      "QPSK": 3993,
+      "8PSK": 0,
+      "16QAM": 0,
+      "DQPSK": 0
+    },
+    "snr_distribution": {
+      "4dB": 5,
+      "6dB": 1091,
+      "8dB": 2463,
+      "10dB": 1818,
+      "12dB": 3711,
+      "14dB": 524,
+      "16dB": 38,
+      "18dB": 2
+    },
+    "psd_stats": {
+      "mean": -0.0033404964487999678,
+      "std": 1.0050451755523682,
+      "min": -7.971282958984375,
+      "max": 5.588704586029053
+    }
+  },
+  "test": {
+    "total_samples": 9653,
+    "pu_distribution": {
+      "idle": 2167,
+      "active": 7486
+    },
+    "mod_distribution": {
+      "BPSK": 5660,
+      "QPSK": 3993,
+      "8PSK": 0,
+      "16QAM": 0,
+      "DQPSK": 0
+    },
+    "snr_distribution": {
+      "4dB": 4,
+      "6dB": 1091,
+      "8dB": 2465,
+      "10dB": 1819,
+      "12dB": 3712,
+      "14dB": 524,
+      "16dB": 36,
+      "18dB": 2
+    },
+    "psd_stats": {
+      "mean": -0.0073859416879713535,
+      "std": 1.0036065578460693,
+      "min": -10.0,
+      "max": 4.968033313751221
+    }
+  },
+  "total": 64350,
+  "preprocessing": {
+    "scaler": "StandardScaler",
+    "clip_range": [
+      -10.0,
+      10.0
+    ],
+    "seed": 42
+  }
+}

@@ -1,0 +1,82 @@
+# Training Configuration
+training:
+  # General
+  experiment_name: "spectrasense_v1"
+  seed: 42
+  deterministic: true
+
+  # Phase 1: Self-Supervised Pre-Training (MSM)
+  phase1:
+    enabled: true
+    epochs: 30
+    batch_size: 64
+    learning_rate: 3.0e-4
+    optimizer: "adam"
+    weight_decay: 0.0
+    mask_ratio: 0.20
+    mask_strategy: "token"  # mask at token level after CNN
+    loss: "mse"
+    scheduler:
+      type: "cosine"
+      warmup_epochs: 3
+      min_lr: 1.0e-6
+
+  # Phase 2: Supervised Multi-Task Fine-Tuning
+  phase2:
+    enabled: true
+    epochs: 50
+    batch_size: 64
+    learning_rate: 1.0e-4
+    optimizer: "adamw"
+    weight_decay: 5.0e-4
+    gradient_clip: 1.0
+    scheduler:
+      type: "cosine"
+      warmup_epochs: 5
+      min_lr: 1.0e-6
+    early_stopping:
+      enabled: true
+      patience: 8
+      monitor: "val_loss"
+      mode: "min"
+
+  # Loss configuration
+  losses:
+    pu:
+      type: "focal"
+      gamma: 2.0
+      alpha: null  # computed from data
+    modulation:
+      type: "cross_entropy"
+      class_weights: null  # computed from data
+    snr:
+      type: "huber"
+      delta: 1.0
+    weighting: "kendall_uncertainty"
+
+  # Mixed precision
+  mixed_precision: true
+  
+  # DataLoader
+  dataloader:
+    num_workers: 4
+    pin_memory: true
+    prefetch_factor: 2
+
+  # Logging
+  logging:
+    tensorboard: true
+    wandb: false
+    wandb_project: "spectrasense"
+    log_every_n_steps: 10
+    save_every_n_epochs: 5
+
+  # Checkpointing
+  checkpoint:
+    dir: "checkpoints"
+    save_best: true
+    save_last: true
+    monitor: "val_loss"
+
+  # Hardware
+  device: "cuda"  # auto, cuda, cpu, mps

@@ -1,0 +1,63 @@
+# Dataset Configuration
+dataset:
+  # Raw data paths
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  metadata_dir: "data/metadata"
+
+  # Primary data source
+  primary_source: "Secondary_User"
+  primary_files:
+    bpsk: "psd_binned_by_snr_bpsk.pth"
+    qpsk: "psd_binned_by_snr_qpsk.pth"
+    16qam: "psd_binned_by_snr_16qam.pth"
+    8psk: "psd_log_8psk.pth"
+    16qam_log: "psd_log_16qam.pth"
+
+  # Secondary data source
+  secondary_source: "New_Dataset"
+
+  # PSD parameters
+  psd:
+    num_bins: 192
+    freq_start_mhz: 2380
+    freq_end_mhz: 2420
+    bandwidth_mhz: 40
+    resolution_khz: 208.3
+
+  # SNR bins
+  snr_bins: [4, 6, 8, 10, 12, 14, 16, 18, 20]
+  snr_range:
+    min: 4
+    max: 20
+
+  # Modulation classes
+  modulations:
+    0: "BPSK"
+    1: "QPSK"
+    2: "8PSK"
+    3: "16QAM"
+    4: "DQPSK"
+  num_modulations: 5
+
+  # PU labels
+  pu_labels:
+    0: "idle"
+    1: "active"
+
+  # Split ratios
+  split:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+    random_seed: 42
+    stratify_by: "snr"
+
+  # Preprocessing
+  preprocessing:
+    normalize: true
+    scaler: "standard"
+    clip_min: -10.0
+    clip_max: 10.0
+    reject_non_finite: true
+    dtype: "float32"
