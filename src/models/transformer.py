@@ -1,254 +1,132 @@
-"""Stage 3: Transformer Encoder for global spectral context modeling.
+"""Stage 3: Energy-guided transformer encoder."""
 
-Implements a lightweight Transformer encoder with Pre-LayerNorm architecture,
-multi-head self-attention, and GELU-activated FFN layers.
-"""
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import math
-from typing import Optional
+import torch.nn.functional as F
 
 
-class MultiHeadSelfAttention(nn.Module):
-    """Multi-Head Self-Attention mechanism.
-    
-    Implements scaled dot-product attention with multiple heads.
-    Each head has d_k = d_model // num_heads = 16 dimensions.
-    """
-    
-    def __init__(self, d_model: int = 64, num_heads: int = 4, dropout: float = 0.1):
-        """Initialize MHSA.
-        
-        Args:
-            d_model: Model dimension.
-            num_heads: Number of attention heads.
-            dropout: Attention dropout rate.
-        """
+D_MODEL = 96
+NUM_TRANSFORMER_LAYERS = 3
+TRANSFORMER_FFN_DIM = 192
+ENERGY_BIAS_INIT = 0.0
+
+
+class EnergyGuidedTransformerLayer(nn.Module):
+    """Pre-LN transformer layer with energy-guided attention bias."""
+
+    def __init__(
+        self,
+        d_model: int = D_MODEL,
+        num_heads: int = 4,
+        ffn_dim: int = TRANSFORMER_FFN_DIM,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        
+
         self.d_model = d_model
         self.num_heads = num_heads
-        self.d_k = d_model // num_heads  # 16
-        self.scale = math.sqrt(self.d_k)
-        
-        # QKV projections
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
-        
-        self.attn_dropout = nn.Dropout(dropout)
-    
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Compute multi-head self-attention.
-        
-        Args:
-            x: Input tensor of shape (B, seq_len, d_model).
-            mask: Optional attention mask.
-            
-        Returns:
-            Attention output of shape (B, seq_len, d_model).
-        """
-        B, N, _ = x.shape
-        
-        # Compute Q, K, V and reshape for multi-head
-        Q = self.W_q(x).view(B, N, self.num_heads, self.d_k).transpose(1, 2)
-        K = self.W_k(x).view(B, N, self.num_heads, self.d_k).transpose(1, 2)
-        V = self.W_v(x).view(B, N, self.num_heads, self.d_k).transpose(1, 2)
-        
-        # Scaled dot-product attention
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
-        
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-        
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, V)
-        
-        # Reshape and project
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, self.d_model)
-        output = self.W_o(attn_output)
-        
-        return output
+        self.d_k = d_model // num_heads
 
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
 
-class FeedForwardNetwork(nn.Module):
-    """Position-wise Feed-Forward Network with GELU activation."""
-    
-    def __init__(self, d_model: int = 64, ffn_dim: int = 128, dropout: float = 0.1):
-        """Initialize FFN.
-        
-        Args:
-            d_model: Input and output dimension.
-            ffn_dim: Hidden dimension.
-            dropout: Dropout rate.
-        """
-        super().__init__()
-        self.net = nn.Sequential(
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+
+        self.energy_lambda = nn.Parameter(torch.tensor(ENERGY_BIAS_INIT))
+
+        self.ffn = nn.Sequential(
             nn.Linear(d_model, ffn_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(ffn_dim, d_model),
             nn.Dropout(dropout),
         )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through FFN.
-        
-        Args:
-            x: Input tensor of shape (B, seq_len, d_model).
-            
-        Returns:
-            Output tensor of shape (B, seq_len, d_model).
-        """
-        return self.net(x)
+        self.attn_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, energy_bias: torch.Tensor | None = None) -> torch.Tensor:
+        b, l, d = x.shape
+        x_norm = self.norm1(x)
+
+        q = self.w_q(x_norm).view(b, l, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.w_k(x_norm).view(b, l, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.w_v(x_norm).view(b, l, self.num_heads, self.d_k).transpose(1, 2)
+
+        scale = self.d_k ** -0.5
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        if energy_bias is not None:
+            e_bias = energy_bias.unsqueeze(1).unsqueeze(2)
+            attn_logits = attn_logits + self.energy_lambda * e_bias
+
+        attn_weights = F.softmax(attn_logits, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+        attn_out = torch.matmul(attn_weights, v)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b, l, d)
+        attn_out = self.w_o(attn_out)
+
+        x = x + attn_out
+        x = x + self.ffn(self.norm2(x))
+        return x
 
 
-class TransformerEncoderLayer(nn.Module):
-    """Single Transformer encoder layer with Pre-LayerNorm architecture.
-    
-    Architecture: LN → MHSA → Residual → LN → FFN → Residual
-    """
-    
+class SpectrumTransformerEncoder(nn.Module):
+    """Stack of energy-guided transformer layers."""
+
     def __init__(
         self,
-        d_model: int = 64,
+        num_layers: int = NUM_TRANSFORMER_LAYERS,
+        d_model: int = D_MODEL,
         num_heads: int = 4,
-        ffn_dim: int = 128,
+        ffn_dim: int = TRANSFORMER_FFN_DIM,
         dropout: float = 0.1,
     ):
-        """Initialize Transformer encoder layer.
-        
-        Args:
-            d_model: Model dimension.
-            num_heads: Number of attention heads.
-            ffn_dim: FFN hidden dimension.
-            dropout: Dropout rate.
-        """
         super().__init__()
-        
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadSelfAttention(d_model, num_heads, dropout)
-        self.dropout1 = nn.Dropout(dropout)
-        
-        self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = FeedForwardNetwork(d_model, ffn_dim, dropout)
-    
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass through encoder layer.
-        
-        Args:
-            x: Input tensor of shape (B, seq_len, d_model).
-            mask: Optional attention mask.
-            
-        Returns:
-            Output tensor of shape (B, seq_len, d_model).
-        """
-        # Pre-norm MHSA with residual
-        residual = x
-        x = self.norm1(x)
-        x = self.attn(x, mask)
-        x = self.dropout1(x)
-        x = residual + x
-        
-        # Pre-norm FFN with residual
-        residual = x
-        x = self.norm2(x)
-        x = self.ffn(x)
-        x = residual + x
-        
-        return x
+        self.layers = nn.ModuleList(
+            [EnergyGuidedTransformerLayer(d_model, num_heads, ffn_dim, dropout) for _ in range(num_layers)]
+        )
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, t: torch.Tensor, energy_bias: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        x = t
+        for layer in self.layers:
+            x = layer(x, energy_bias=energy_bias)
+        x = self.final_norm(x)
+        e_cls = x[:, 0, :]
+        return x, e_cls
 
 
 class TransformerEncoder(nn.Module):
-    """Complete Transformer Encoder (Stage 3).
-    
-    Stack of L=2 Pre-LayerNorm Transformer layers with a final LayerNorm.
-    Extracts the [CLS] token representation for downstream task heads.
-    """
-    
+    """Compatibility wrapper exposing legacy forward/forward_full API."""
+
     def __init__(
         self,
-        num_layers: int = 2,
-        d_model: int = 64,
+        num_layers: int = NUM_TRANSFORMER_LAYERS,
+        d_model: int = D_MODEL,
         num_heads: int = 4,
-        ffn_dim: int = 128,
+        ffn_dim: int = TRANSFORMER_FFN_DIM,
         dropout: float = 0.1,
     ):
-        """Initialize Transformer encoder.
-        
-        Args:
-            num_layers: Number of encoder layers.
-            d_model: Model dimension.
-            num_heads: Number of attention heads.
-            ffn_dim: FFN hidden dimension.
-            dropout: Dropout rate.
-        """
         super().__init__()
-        
-        self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model, num_heads, ffn_dim, dropout)
-            for _ in range(num_layers)
-        ])
-        
-        self.final_norm = nn.LayerNorm(d_model)
-    
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Forward pass through Transformer encoder.
-        
-        Args:
-            x: Input token sequence of shape (B, 25, 64).
-            mask: Optional attention mask.
-            
-        Returns:
-            CLS token representation of shape (B, 64).
-        """
-        for layer in self.layers:
-            x = layer(x, mask)
-        
-        x = self.final_norm(x)
-        
-        # Extract [CLS] token (first position)
-        cls_output = x[:, 0, :]  # (B, 64)
-        
-        return cls_output
-    
+        self.encoder = SpectrumTransformerEncoder(num_layers, d_model, num_heads, ffn_dim, dropout)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None, energy_bias: torch.Tensor | None = None) -> torch.Tensor:
+        _, e_cls = self.encoder(x, energy_bias=energy_bias)
+        return e_cls
+
     def forward_full(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        energy_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass returning all token representations.
-        
-        Used during MSM pre-training where all tokens are needed for reconstruction.
-        
-        Args:
-            x: Input token sequence of shape (B, 25, 64).
-            mask: Optional attention mask.
-            
-        Returns:
-            Full token sequence of shape (B, 25, 64).
-        """
-        for layer in self.layers:
-            x = layer(x, mask)
-        
-        x = self.final_norm(x)
-        
-        return x
-    
+        z, _ = self.encoder(x, energy_bias=energy_bias)
+        return z
+
     def get_num_parameters(self) -> int:
-        """Count total trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

@@ -16,9 +16,11 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import yaml
 
 from src.models.spectrasense import SpectraSense, build_spectrasense
+from src.models.spectrasense import PSDDenoisingHead, compute_denoising_target
 from src.datasets.spectrum_dataset import create_dataloaders
 from src.training.trainer import SpectraSenseTrainer
 from src.utils.seed import set_seed
@@ -66,6 +68,76 @@ def get_device(config_device: str = "auto") -> torch.device:
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(config_device)
+
+
+def _extract_psd_batch(batch):
+    """Extract PSD tensor with shape (B, 1, 192) from DataLoader batch."""
+    if isinstance(batch, dict):
+        x = batch["psd"]
+    else:
+        x = batch[0]
+    if x.dim() == 2:
+        x = x.unsqueeze(1)
+    return x
+
+
+def run_phase1a_denoising_pretrain(model, train_loader, device, logger, epochs: int = 15):
+    """Phase 1A: self-supervised denoising pre-training."""
+    logger.info("Starting Phase 1A: Raw PSD Denoising Pre-Training...")
+
+    model_d_model = int(getattr(model, "d_model", 96))
+    denoising_head = PSDDenoisingHead(d_model=model_d_model, output_bins=192).to(device)
+
+    phase1a_params = (
+        list(model.cnn.parameters())
+        + list(model.tokenizer.parameters())
+        + list(model.transformer.parameters())
+        + list(denoising_head.parameters())
+    )
+
+    optimizer_1a = torch.optim.Adam(phase1a_params, lr=5e-4, betas=(0.9, 0.999), eps=1e-8)
+    criterion_denoise = nn.MSELoss()
+
+    for epoch in range(epochs):
+        model.train()
+        denoising_head.train()
+        total_loss = 0.0
+        n_batches = 0
+
+        for batch in train_loader:
+            psd_batch = _extract_psd_batch(batch).to(device)
+
+            optimizer_1a.zero_grad(set_to_none=True)
+
+            _, _, _, e_cls = model(psd_batch, return_features=True)
+            psd_recon = denoising_head(e_cls)
+
+            psd_raw_2d = psd_batch.squeeze(1)
+            psd_target = compute_denoising_target(psd_raw_2d, pool_kernel=11)
+
+            loss = criterion_denoise(psd_recon, psd_target)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(phase1a_params, max_norm=1.0)
+            optimizer_1a.step()
+
+            total_loss += float(loss.item())
+            n_batches += 1
+
+        avg_loss = total_loss / max(1, n_batches)
+        logger.info(f"Phase 1A Epoch [{epoch + 1}/{epochs}] | Denoise MSE: {avg_loss:.4f}")
+
+    phase1a_dir = Path("checkpoints") / "phase1a"
+    phase1a_dir.mkdir(parents=True, exist_ok=True)
+    phase1a_ckpt = phase1a_dir / "slm_phase1a_best.pt"
+    torch.save({"model_state": model.state_dict(), "epoch": epochs, "phase": "1a"}, phase1a_ckpt)
+
+    del denoising_head, optimizer_1a
+    logger.info("Phase 1A complete. Denoising head discarded. Proceeding to Phase 1B...")
+
+    # Phase 1B warm start load hook.
+    checkpoint_1a = torch.load(phase1a_ckpt, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint_1a["model_state"])
+    logger.info("Loaded Phase 1A checkpoint for Phase 1B warm start.")
 
 
 def main():
@@ -140,6 +212,7 @@ def main():
     # Build model
     logger.info("\nBuilding SpectraSense model...")
     model = build_spectrasense(model_config)
+    model = model.to(device)
     
     param_breakdown = model.get_parameter_breakdown()
     logger.info(f"  Total parameters: {param_breakdown['total']:,}")
@@ -153,7 +226,13 @@ def main():
         logger.info(f"\nResuming from: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
+        model = model.to(device)
         logger.info(f"  Resumed from epoch {checkpoint.get('epoch', 'unknown')}")
+
+    # Phase 1A pre-training runs before existing supervised training.
+    if train_config.get("phase1", {}).get("enabled", False) and not args.resume:
+        phase1a_epochs = int(train_config.get("phase1", {}).get("epochs_phase1a", 15))
+        run_phase1a_denoising_pretrain(model, train_loader, device, logger, epochs=phase1a_epochs)
     
     # Initialize trainer
     trainer = SpectraSenseTrainer(

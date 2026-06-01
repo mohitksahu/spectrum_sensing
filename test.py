@@ -25,7 +25,7 @@ def run_shape_checks():
     # MSM check
     model.enable_msm()
     mask_ratio = 0.2
-    num_patches = 24
+    num_patches = 47
     mask = torch.rand(B, num_patches) < mask_ratio
     msm_tokens = model.forward_msm(x, mask)
     assert msm_tokens.shape == (B, num_patches, model.d_model)

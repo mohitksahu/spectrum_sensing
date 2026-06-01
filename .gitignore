@@ -36,6 +36,7 @@ data/processed/
 data/interim/
 !data/.gitkeep
 !data/raw/
+*.csv
 
 # Generated reports
 reports/

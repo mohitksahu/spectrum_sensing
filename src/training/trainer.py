@@ -10,7 +10,7 @@ from ..utils.logger import ExperimentLogger
 from ..utils.checkpoint import CheckpointManager
 from ..losses.focal_loss import FocalLoss
 from ..losses.uncertainty_loss import KendallUncertaintyLoss
-from .callbacks import EarlyStopping
+from .callbacks import EarlyStopping, get_warmup_cosine_scheduler
 from .metrics import compute_pu_metrics, compute_mod_metrics, compute_snr_metrics
 
 
@@ -154,14 +154,40 @@ class SpectraSenseTrainer:
             )
 
         self.pu_loss = FocalLoss(gamma=float(config.get("losses", {}).get("pu", {}).get("gamma", 2.0)))
-        self.mod_loss = nn.CrossEntropyLoss(weight=self.mod_class_weights)
+        # Phase 2 Decision 3: add modest label smoothing to the modulation head (previously 0.0)
+        # to reduce overconfidence and narrow the test/train modulation gap.
+        self.mod_loss = nn.CrossEntropyLoss(
+            weight=self.mod_class_weights,
+            label_smoothing=float(config.get("losses", {}).get("mod", {}).get("label_smoothing", 0.05)),
+        )
         self.snr_loss = nn.HuberLoss(delta=float(config.get("losses", {}).get("snr", {}).get("delta", 1.0)))
         self.uncertainty = KendallUncertaintyLoss(num_tasks=3).to(device)
 
         # Train uncertainty parameters together with model parameters.
         self.optimizer.add_param_group({"params": self.uncertainty.parameters()})
 
+        # Phase 2 Decision 4: use cosine annealing with warmup instead of the previous constant learning rate,
+        # because the validation curve plateaued for multiple epochs before early stopping.
+        self.scheduler = get_warmup_cosine_scheduler(
+            self.optimizer,
+            warmup_steps=max(1, int(0.05 * self.epochs)),
+            total_steps=max(1, self.epochs),
+            min_lr=0.1,
+        )
+
         self.best_metrics: Dict[str, float] = {"val_loss": float("inf")}
+
+    def _apply_snr_augmentation(self, x: torch.Tensor, snr: torch.Tensor) -> torch.Tensor:
+        """Apply light training-only noise injection that is stronger for lower SNR samples."""
+        snr = snr.view(-1, 1, 1).float()
+        low_snr_scale = torch.clamp((10.0 - snr) / 10.0, min=0.0, max=1.0)
+        noise_std = 0.01 + 0.04 * low_snr_scale
+
+        # Phase 2 Decision 5: inject SNR-aware noise during training (previously no input augmentation)
+        # so 4-6 dB examples are seen with slightly more corruption than cleaner bins.
+        if x.dim() == 2:
+            return x + torch.randn_like(x) * noise_std.squeeze(-1)
+        return x + torch.randn_like(x) * noise_std
 
     def _compute_losses(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         raw_losses = {
@@ -200,6 +226,9 @@ class SpectraSenseTrainer:
             y_pu = y_pu.to(self.device)
             y_mod = y_mod.to(self.device)
             y_snr = y_snr.to(self.device)
+
+            if training:
+                x = self._apply_snr_augmentation(x, y_snr)
 
             if training:
                 self.optimizer.zero_grad(set_to_none=True)
@@ -300,6 +329,9 @@ class SpectraSenseTrainer:
                 metrics=metrics,
                 extra={"uncertainty_state_dict": self.uncertainty.state_dict()},
             )
+
+            if self.scheduler is not None:
+                self.scheduler.step()
 
             if val_loss < self.best_metrics["val_loss"]:
                 self.best_metrics = {"val_loss": val_loss, "epoch": epoch}

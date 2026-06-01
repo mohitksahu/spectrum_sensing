@@ -32,6 +32,7 @@ class EarlyStopping:
 def get_warmup_cosine_scheduler(optimizer: Optimizer, warmup_steps: int, total_steps: int, min_lr: float = 0.0):
     """Return a LambdaLR scheduler with linear warmup and cosine decay."""
     def lr_lambda(step: int):
+        step = step + 1
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
         # cosine decay after warmup

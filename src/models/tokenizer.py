@@ -1,95 +1,76 @@
-"""Stage 2: Patch Tokenization and Positional Encoding.
-
-Groups CNN output into non-overlapping patches, projects to model dimension,
-prepends a learnable [CLS] token, and adds learnable positional encoding.
-"""
+"""Stage 2: Overlapping patch tokenization and positional encoding."""
 
 import torch
 import torch.nn as nn
-import math
-from typing import Optional
 
 
-class PatchTokenizer(nn.Module):
-    """Converts CNN features into patch tokens for Transformer input.
-    
-    Takes the (B, 192, 16) CNN output, groups into 24 non-overlapping patches
-    of size 8 (covering ~1.67 MHz each), flattens each patch (8*16=128 dim),
-    and projects to d_model=64.
-    
-    Architecture:
-        Input (B, 192, 16) → Reshape (B, 24, 128) → Linear(128, 64)
-        → Prepend [CLS] → Add positional encoding → Output (B, 25, 64)
+PATCH_SIZE = 8
+PATCH_STRIDE = 4
+NUM_PATCHES = 47
+D_MODEL = 96
+CNN_OUT_CHANNELS = 16
+
+
+class OverlappingPatchTokenizer(nn.Module):
+    """Convert CNN feature map to overlapping patch tokens.
+
+    Input: (B, 16, 192)
+    Output: (B, 48, 96)
     """
-    
+
     def __init__(
         self,
-        seq_length: int = 192,
-        patch_size: int = 8,
-        in_channels: int = 16,
-        d_model: int = 64,
+        cnn_channels: int = CNN_OUT_CHANNELS,
+        patch_size: int = PATCH_SIZE,
+        patch_stride: int = PATCH_STRIDE,
+        num_patches: int = NUM_PATCHES,
+        d_model: int = D_MODEL,
+        **_: dict,
     ):
-        """Initialize patch tokenizer.
-        
-        Args:
-            seq_length: Input sequence length (192 frequency bins).
-            patch_size: Number of frequency bins per patch.
-            in_channels: Number of CNN output channels.
-            d_model: Transformer model dimension.
-        """
         super().__init__()
-        
-        self.seq_length = seq_length
         self.patch_size = patch_size
-        self.in_channels = in_channels
+        self.patch_stride = patch_stride
+        self.num_patches = num_patches
         self.d_model = d_model
-        self.num_patches = seq_length // patch_size  # 24
-        self.patch_dim = patch_size * in_channels     # 128
-        
-        # Linear projection from patch_dim to d_model
-        self.projection = nn.Linear(self.patch_dim, d_model)
-        
-        # Learnable [CLS] token
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        
-        # Learnable positional encoding (num_patches + 1 for CLS)
-        self.pos_encoding = nn.Parameter(
-            torch.randn(1, self.num_patches + 1, d_model) * 0.02
-        )
-        
-        # Layer norm after tokenization
-        self.norm = nn.LayerNorm(d_model)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: create patch tokens with positional encoding.
-        
-        Args:
-            x: CNN output tensor of shape (B, 192, 16).
-            
-        Returns:
-            Token sequence of shape (B, 25, 64) — 24 patches + 1 CLS token.
-        """
-        B = x.shape[0]
-        
-        # Reshape into patches: (B, 192, 16) → (B, 24, 8, 16) → (B, 24, 128)
-        x = x.reshape(B, self.num_patches, self.patch_size, self.in_channels)
-        x = x.reshape(B, self.num_patches, self.patch_dim)
-        
-        # Project to d_model: (B, 24, 128) → (B, 24, 64)
-        tokens = self.projection(x)
-        
-        # Prepend [CLS] token: (B, 24, 64) → (B, 25, 64)
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        tokens = torch.cat([cls_tokens, tokens], dim=1)
-        
-        # Add positional encoding
-        tokens = tokens + self.pos_encoding
-        
-        # Layer normalization
-        tokens = self.norm(tokens)
-        
-        return tokens
-    
+
+        patch_flat_dim = patch_size * cnn_channels
+        self.patch_projection = nn.Linear(patch_flat_dim, d_model)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        self.pos_encoding = nn.Parameter(torch.zeros(1, num_patches + 1, d_model))
+        nn.init.trunc_normal_(self.pos_encoding, std=0.02)
+
+    def forward(self, f_local: torch.Tensor) -> torch.Tensor:
+        b = f_local.shape[0]
+        patches = f_local.unfold(dimension=2, size=self.patch_size, step=self.patch_stride)
+        patches = patches.permute(0, 2, 1, 3)
+        patches = patches.reshape(b, self.num_patches, -1)
+
+        patch_tokens = self.patch_projection(patches)
+        cls_tokens = self.cls_token.expand(b, -1, -1)
+        t = torch.cat([cls_tokens, patch_tokens], dim=1)
+        t = t + self.pos_encoding
+        return t
+
+    def get_patch_energies(self, f_local: torch.Tensor) -> torch.Tensor:
+        b = f_local.shape[0]
+        patches = f_local.unfold(dimension=2, size=self.patch_size, step=self.patch_stride)
+        patches = patches.permute(0, 2, 1, 3).reshape(b, self.num_patches, -1)
+
+        patch_energies = patches.pow(2).mean(dim=-1)
+        e_min = patch_energies.min(dim=1, keepdim=True).values
+        e_max = patch_energies.max(dim=1, keepdim=True).values
+        patch_energies_norm = (patch_energies - e_min) / (e_max - e_min + 1e-8)
+
+        cls_energy = torch.ones(b, 1, device=f_local.device)
+        energies = torch.cat([cls_energy, patch_energies_norm], dim=1)
+        return energies
+
     def get_num_parameters(self) -> int:
-        """Count total trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+# Backward-compatible alias.
+PatchTokenizer = OverlappingPatchTokenizer
