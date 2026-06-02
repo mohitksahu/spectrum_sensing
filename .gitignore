@@ -12,6 +12,7 @@ __pycache__/
 venv/
 env/
 ENV/
+ext.py
 
 # IDE / editor
 .vscode/
@@ -37,6 +38,8 @@ data/interim/
 !data/.gitkeep
 !data/raw/
 *.csv
+data/metadata/
+
 
 # Generated reports
 reports/
@@ -54,3 +57,11 @@ htmlcov/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+data/metadata/dataset_stats.json
+curr_dir.txt
+analyze_slm_dist.py
+analyze_snr_bug.py
+check_inventory.py
+get_pre_retrain_metrics.py
+rule_based_baseline.py

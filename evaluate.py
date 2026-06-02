@@ -113,6 +113,42 @@ def main():
     )
     
     results = evaluator.evaluate()
+
+    # Print per-SNR PU performance table
+    per_snr = results.get("per_snr", {})
+    per_snr_bins = []
+    for key, metrics in per_snr.items():
+        if key.endswith("dB") and not key.startswith("low_"):
+            try:
+                snr_value = int(key.replace("dB", ""))
+            except ValueError:
+                continue
+            per_snr_bins.append((snr_value, key, metrics))
+    per_snr_bins.sort(key=lambda item: item[0])
+
+    if per_snr_bins:
+        print("\nPer-SNR PU Performance (TPR/TNR/Balanced Acc)")
+        header = f"{'SNR':>6} {'n_active':>9} {'n_inactive':>11} {'TPR':>8} {'TNR':>8} {'BalAcc':>8}"
+        print(header)
+        print("-" * len(header))
+
+        def _fmt_rate(value: float) -> str:
+            if np.isnan(value):
+                return "  nan  "
+            return f"{value * 100:6.2f}%"
+
+        for _, key, metrics in per_snr_bins:
+            tpr = metrics.get("pu_tpr", float("nan"))
+            tnr = metrics.get("pu_tnr", float("nan"))
+            bal = metrics.get("pu_balanced_accuracy", float("nan"))
+            print(
+                f"{key:>6}"
+                f" {metrics.get('n_active', 0):>9}"
+                f" {metrics.get('n_inactive', 0):>11}"
+                f" {_fmt_rate(tpr):>8}"
+                f" {_fmt_rate(tnr):>8}"
+                f" {_fmt_rate(bal):>8}"
+            )
     
     # Generate figures
     if args.save_figures:
@@ -159,10 +195,10 @@ def main():
             save_path=str(figures_dir / "snr_error"),
         )
         
-        # 6. Per-SNR Accuracy
+        # 6. Per-SNR Balanced Accuracy
         plot_per_snr_accuracy(
             per_snr_metrics=results["per_snr"],
-            title="Per-SNR Performance Analysis",
+            title="Per-SNR Balanced Accuracy",
             save_path=str(figures_dir / "per_snr_accuracy"),
         )
         
@@ -196,7 +232,8 @@ Parameters                     {results['model_params']:>8,}        ~93,000     
     # Low-SNR analysis
     if "low_snr_<8dB" in results["per_snr"]:
         low_snr = results["per_snr"]["low_snr_<8dB"]
-        print(f"Low-SNR PU Accuracy (<8dB)     {low_snr['pu_accuracy']*100:>6.2f}%       ≥ 93.00%      {'✓' if low_snr['pu_accuracy'] >= 0.93 else '✗'}")
+        low_bal = low_snr.get("pu_balanced_accuracy", float("nan"))
+        print(f"Low-SNR PU Balanced Acc (<8dB) {low_bal*100:>6.2f}%       ≥ 93.00%      {'✓' if low_bal >= 0.93 else '✗'}")
     
     print(f"{'='*60}")
 

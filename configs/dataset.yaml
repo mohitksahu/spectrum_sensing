@@ -51,7 +51,7 @@ dataset:
     val: 0.15
     test: 0.15
     random_seed: 42
-    stratify_by: "snr"
+    stratify_by: "modulation_pu"
 
   # Preprocessing
   preprocessing:

@@ -153,7 +153,10 @@ class SpectraSenseTrainer:
                 mode=str(early_cfg.get("mode", "min")),
             )
 
-        self.pu_loss = FocalLoss(gamma=float(config.get("losses", {}).get("pu", {}).get("gamma", 2.0)))
+        self.pu_loss = FocalLoss(
+            gamma=float(config.get("losses", {}).get("pu", {}).get("gamma", 2.0)),
+            alpha=self.pu_class_weights,
+        )
         # Phase 2 Decision 3: add modest label smoothing to the modulation head (previously 0.0)
         # to reduce overconfidence and narrow the test/train modulation gap.
         self.mod_loss = nn.CrossEntropyLoss(

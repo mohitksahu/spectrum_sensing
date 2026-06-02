@@ -36,6 +36,12 @@ def _safe_pr_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
         return float("nan")
 
 
+def _safe_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
 class SpectraSenseEvaluator:
     """Run full model evaluation and persist structured metrics."""
 
@@ -119,9 +125,29 @@ class SpectraSenseEvaluator:
             if not np.any(idx):
                 continue
             bin_name = f"{snr_bin}dB"
+            bin_pu_targets = pu_targets[idx]
+            bin_pu_preds = pu_preds[idx]
+            tp = int(np.sum((bin_pu_targets == 1) & (bin_pu_preds == 1)))
+            tn = int(np.sum((bin_pu_targets == 0) & (bin_pu_preds == 0)))
+            fp = int(np.sum((bin_pu_targets == 0) & (bin_pu_preds == 1)))
+            fn = int(np.sum((bin_pu_targets == 1) & (bin_pu_preds == 0)))
+            tpr = _safe_rate(tp, tp + fn)
+            tnr = _safe_rate(tn, tn + fp)
+            if np.isnan(tpr) or np.isnan(tnr):
+                balanced_acc = float("nan")
+            else:
+                balanced_acc = float((tpr + tnr) / 2.0)
             per_snr[bin_name] = {
                 "n_samples": int(idx.sum()),
-                "pu_accuracy": float(accuracy_score(pu_targets[idx], pu_preds[idx])),
+                "n_active": int(np.sum(bin_pu_targets == 1)),
+                "n_inactive": int(np.sum(bin_pu_targets == 0)),
+                "tp": tp,
+                "tn": tn,
+                "fp": fp,
+                "fn": fn,
+                "pu_tpr": tpr,
+                "pu_tnr": tnr,
+                "pu_balanced_accuracy": balanced_acc,
                 "mod_accuracy": float(accuracy_score(mod_targets[idx], mod_preds[idx])),
                 "snr_mae": float(mean_absolute_error(snr_targets[idx], snr_preds[idx])),
                 "snr_rmse": float(np.sqrt(mean_squared_error(snr_targets[idx], snr_preds[idx]))),
@@ -129,9 +155,29 @@ class SpectraSenseEvaluator:
 
         low_idx = snrs < 8.0
         if np.any(low_idx):
+            low_pu_targets = pu_targets[low_idx]
+            low_pu_preds = pu_preds[low_idx]
+            tp = int(np.sum((low_pu_targets == 1) & (low_pu_preds == 1)))
+            tn = int(np.sum((low_pu_targets == 0) & (low_pu_preds == 0)))
+            fp = int(np.sum((low_pu_targets == 0) & (low_pu_preds == 1)))
+            fn = int(np.sum((low_pu_targets == 1) & (low_pu_preds == 0)))
+            tpr = _safe_rate(tp, tp + fn)
+            tnr = _safe_rate(tn, tn + fp)
+            if np.isnan(tpr) or np.isnan(tnr):
+                balanced_acc = float("nan")
+            else:
+                balanced_acc = float((tpr + tnr) / 2.0)
             per_snr["low_snr_<8dB"] = {
                 "n_samples": int(low_idx.sum()),
-                "pu_accuracy": float(accuracy_score(pu_targets[low_idx], pu_preds[low_idx])),
+                "n_active": int(np.sum(low_pu_targets == 1)),
+                "n_inactive": int(np.sum(low_pu_targets == 0)),
+                "tp": tp,
+                "tn": tn,
+                "fp": fp,
+                "fn": fn,
+                "pu_tpr": tpr,
+                "pu_tnr": tnr,
+                "pu_balanced_accuracy": balanced_acc,
                 "mod_accuracy": float(accuracy_score(mod_targets[low_idx], mod_preds[low_idx])),
                 "snr_mae": float(mean_absolute_error(snr_targets[low_idx], snr_preds[low_idx])),
                 "snr_rmse": float(np.sqrt(mean_squared_error(snr_targets[low_idx], snr_preds[low_idx]))),

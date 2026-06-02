@@ -20,6 +20,7 @@ import yaml
 
 from src.datasets.preprocessing import (
     load_all_data,
+    bin_snrs,
     remove_non_finite,
     stratified_split,
     fit_scaler,
@@ -62,16 +63,21 @@ def main():
     print(f"\n  Total samples loaded: {len(psds):,}")
     print(f"  PSD shape: {psds.shape}")
     print(f"  SNR range: [{snrs.min():.1f}, {snrs.max():.1f}] dB")
-    print(f"  Modulation distribution: {np.bincount(mod_labels, minlength=5)}")
-    print(f"  PU distribution: idle={np.sum(pu_labels==0):,}, active={np.sum(pu_labels==1):,}")
     
-    # Step 2: Remove non-finite samples
-    print("\n[2/6] Removing non-finite samples...")
+    # Step 2: Bin SNR values and filter
+    print("\n[2/6] Binning SNR values and filtering out-of-range samples...")
+    # These bins are hardcoded as per the user's specification.
+    # In a real project, they might be moved to a config file.
+    target_bins = [4, 6, 8, 10, 12, 14, 16, 18, 20]
+    psds, pu_labels, mod_labels, snrs = bin_snrs(psds, pu_labels, mod_labels, snrs, target_bins=target_bins)
+    
+    # Step 3: Remove non-finite samples
+    print("\n[3/6] Removing non-finite samples...")
     psds, pu_labels, mod_labels, snrs = remove_non_finite(psds, pu_labels, mod_labels, snrs)
     print(f"  Samples after cleaning: {len(psds):,}")
     
-    # Step 3: Train/Val/Test split (BEFORE normalization)
-    print("\n[3/6] Performing stratified train/val/test split...")
+    # Step 4: Train/Val/Test split (BEFORE normalization)
+    print("\n[4/6] Performing stratified train/val/test split...")
     split_config = config["split"]
     splits = stratified_split(
         psds, pu_labels, mod_labels, snrs,
@@ -79,13 +85,14 @@ def main():
         val_ratio=split_config["val"],
         test_ratio=split_config["test"],
         seed=split_config["random_seed"],
+        stratify_by=split_config.get("stratify_by", "modulation_pu"),
     )
     
     for split_name, split_data in splits.items():
         print(f"  {split_name}: {len(split_data['psds']):,} samples")
     
-    # Step 4: Fit scaler on training data only
-    print("\n[4/6] Fitting StandardScaler on training data...")
+    # Step 5: Fit scaler on training data only
+    print("\n[5/6] Fitting StandardScaler on training data...")
     clip_min = config["preprocessing"]["clip_min"]
     clip_max = config["preprocessing"]["clip_max"]
     
@@ -100,8 +107,8 @@ def main():
     print(f"  Scaler std range: [{scaler.scale_.min():.4f}, {scaler.scale_.max():.4f}]")
     print(f"  Train PSD after norm: [{train_psds_norm.min():.2f}, {train_psds_norm.max():.2f}]")
     
-    # Step 5: Compute class weights
-    print("\n[5/6] Computing class weights...")
+    # Step 6: Compute class weights
+    print("\n[6/6] Computing class weights...")
     pu_weights = compute_class_weights(splits["train"]["pu_labels"], num_classes=2)
     mod_weights = compute_class_weights(splits["train"]["mod_labels"], num_classes=5)
     

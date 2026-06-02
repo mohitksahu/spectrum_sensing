@@ -29,6 +29,80 @@ MODULATION_MAP = {
 MODULATION_NAMES = {v: k.upper() for k, v in MODULATION_MAP.items()}
 
 
+def _infer_modulation_from_path(path: Path) -> Optional[int]:
+    """Infer modulation label from the immediate parent directory name."""
+    # Step 2: Fix modulation labeling to use immediate parent folder name.
+    # The parent directory name must be one of: bpsk, qpsk, 8psk, 16qam, dqpsk.
+    parent_name = path.parent.name.lower()
+    mod_id = MODULATION_MAP.get(parent_name)
+    
+    if mod_id is None and path.suffix == ".pth":
+        print(f"  [WARNING] Skipping {path.name}: parent folder '{parent_name}' is not a valid modulation")
+        
+    return mod_id
+
+
+def _rank_raw_file(path: Path) -> Tuple[int, str]:
+    """Sort candidate raw files so we pick one canonical source per folder."""
+    name = path.name.lower()
+    # Prefer dataset.pth, then binned variants
+    if name == "dataset.pth":
+        rank = 0
+    elif name == "dataset_binned.pth":
+        rank = 1
+    elif name.startswith("psd_binned"):
+        rank = 2
+    elif name.startswith("psd_log"):
+        rank = 3
+    else:
+        rank = 4
+    return rank, name
+
+
+def _load_raw_sample_dict(data: Dict[str, Any], modulation_label: int) -> List[Tuple[np.ndarray, int, int, float]]:
+    """Convert a raw sample dictionary into standardized sample tuples."""
+    samples: List[Tuple[np.ndarray, int, int, float]] = []
+
+    if "pairs_by_bin" in data:
+        pairs_by_bin = data.get("pairs_by_bin", {})
+        for snr_bin, pairs in pairs_by_bin.items():
+            snr_value = float(snr_bin)
+            for item in pairs:
+                if len(item) < 2:
+                    continue
+
+                psd_vector = item[0]
+
+                # New binned dumps are typically shaped like:
+                #   (psd_vector, iq_samples, pu_label)
+                # while older variants may use (psd_vector, pu_label, snr).
+                pu_label = None
+                snr = snr_value
+
+                if len(item) >= 3 and np.isscalar(item[2]):
+                    pu_label = int(item[2])
+                elif np.isscalar(item[1]):
+                    pu_label = int(item[1])
+
+                if pu_label is None:
+                    continue
+
+                samples.append((_to_psd_192(psd_vector), pu_label, modulation_label, snr))
+        return samples
+
+    psds = data.get("psds")
+    pu_flags = data.get("pu_flags")
+    snrs = data.get("snrs")
+
+    if psds is None or pu_flags is None or snrs is None:
+        return samples
+
+    for psd_vector, pu_label, snr in zip(psds, pu_flags, snrs):
+        samples.append((_to_psd_192(psd_vector), int(pu_label), modulation_label, float(snr)))
+
+    return samples
+
+
 def _to_psd_192(psd_vector: Any) -> np.ndarray:
     """Convert raw PSD sample to a flat float32 vector of length 192."""
     if isinstance(psd_vector, torch.Tensor):
@@ -48,88 +122,12 @@ def _to_psd_192(psd_vector: Any) -> np.ndarray:
     return padded
 
 
-def load_binned_pth(filepath: str, modulation_label: int) -> List[Tuple[np.ndarray, int, int, float]]:
-    """Load a binned .pth file and extract all samples.
-    
-    Each .pth file has structure:
-        {'pairs_by_bin': {snr_value: [(psd_vector, pu_label, snr), ...]}}
-    
-    Args:
-        filepath: Path to .pth file.
-        modulation_label: Integer modulation class label.
-        
-    Returns:
-        List of (psd_vector, pu_label, mod_label, snr) tuples.
-    """
+def load_raw_pth(filepath: str, modulation_label: int) -> List[Tuple[np.ndarray, int, int, float]]:
+    """Load a raw .pth file and extract all samples."""
     data = torch.load(filepath, map_location="cpu", weights_only=False)
-    samples = []
-    
-    pairs_by_bin = data.get("pairs_by_bin", data)
-    
-    for snr_bin, pairs in pairs_by_bin.items():
-        snr_value = float(snr_bin)
-        for item in pairs:
-            if len(item) >= 3:
-                psd_vector = item[0]
-                pu_label = int(item[1])
-                snr = float(item[2])
-            elif len(item) == 2:
-                psd_vector = item[0]
-                pu_label = int(item[1])
-                snr = snr_value
-            else:
-                continue
-            
-            psd_vector = _to_psd_192(psd_vector)
-            samples.append((psd_vector, pu_label, modulation_label, snr))
-    
-    return samples
-
-
-def load_log_pth(filepath: str, modulation_label: int) -> List[Tuple[np.ndarray, int, int, float]]:
-    """Load a log-format .pth file (from new dataset directory).
-    
-    Log format files may have slightly different internal structure.
-    
-    Args:
-        filepath: Path to .pth file.
-        modulation_label: Integer modulation class label.
-        
-    Returns:
-        List of (psd_vector, pu_label, mod_label, snr) tuples.
-    """
-    data = torch.load(filepath, map_location="cpu", weights_only=False)
-    samples = []
-    
-    # Handle different possible structures
-    if isinstance(data, dict):
-        if "pairs_by_bin" in data:
-            return load_binned_pth(filepath, modulation_label)
-        
-        # Try log format: {snr: [samples...]}
-        for key, value in data.items():
-            try:
-                snr_value = float(key)
-            except (ValueError, TypeError):
-                continue
-            
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, (list, tuple)) and len(item) >= 2:
-                        psd_vector = item[0]
-                        pu_label = int(item[1]) if len(item) > 1 else 1
-                        snr = float(item[2]) if len(item) > 2 else snr_value
-                    elif isinstance(item, torch.Tensor):
-                        psd_vector = item
-                        pu_label = 1
-                        snr = snr_value
-                    else:
-                        continue
-                    
-                    psd_vector = _to_psd_192(psd_vector)
-                    samples.append((psd_vector, pu_label, modulation_label, snr))
-    
-    return samples
+    if not isinstance(data, dict):
+        return []
+    return _load_raw_sample_dict(data, modulation_label)
 
 
 def load_all_data(raw_dir: str, config: Dict) -> Dict[str, np.ndarray]:
@@ -143,70 +141,40 @@ def load_all_data(raw_dir: str, config: Dict) -> Dict[str, np.ndarray]:
         Dictionary with 'psds', 'pu_labels', 'mod_labels', 'snrs' arrays.
     """
     raw_path = Path(raw_dir)
-    all_samples = []
-    
-    # Load primary source (Secondary_User directory)
-    primary_dir = raw_path / config.get("primary_source", "Secondary_User")
-    
-    primary_files = config.get("primary_files", {})
-    
-    # Standard binned files
-    file_mod_map = {
-        "psd_binned_by_snr_bpsk.pth": 0,    # BPSK
-        "psd_binned_by_snr_qpsk.pth": 1,    # QPSK
-        "psd_binned_by_snr_16qam.pth": 3,   # 16QAM
-    }
-    
-    for filename, mod_label in file_mod_map.items():
-        filepath = primary_dir / filename
-        if filepath.exists():
-            print(f"  Loading {filepath.name} (mod={mod_label})...")
-            samples = load_binned_pth(str(filepath), mod_label)
+    all_samples: List[Tuple[np.ndarray, int, int, float]] = []
+
+    grouped_files: Dict[Tuple[Path, int], Path] = {}
+    skipped_files: List[Path] = []
+
+    for pth_file in sorted(raw_path.rglob("*.pth")):
+        if not pth_file.is_file() or pth_file.stat().st_size == 0:
+            continue
+            
+        # Step 1: Fix the loader to skip Symbol1 completely
+        if "Symbol1" in pth_file.parts or "Symbol1" in pth_file.name:
+            continue
+
+        mod_label = _infer_modulation_from_path(pth_file)
+        if mod_label is None:
+            skipped_files.append(pth_file)
+            continue
+
+        group_key = (pth_file.parent, mod_label)
+        chosen = grouped_files.get(group_key)
+        if chosen is None or _rank_raw_file(pth_file) < _rank_raw_file(chosen):
+            grouped_files[group_key] = pth_file
+
+    if skipped_files:
+        print(f"  Skipping {len(skipped_files)} raw .pth files (invalid modulation folders)")
+
+    for (mod_dir, mod_label), pth_file in sorted(grouped_files.items(), key=lambda item: str(item[0][0])):
+        print(f"  Loading {pth_file.relative_to(raw_path)} (mod={mod_label})...")
+        try:
+            samples = load_raw_pth(str(pth_file), mod_label)
             all_samples.extend(samples)
             print(f"    → {len(samples)} samples loaded")
-    
-    # Log format files
-    log_file_map = {
-        "psd_log_8psk.pth": 2,     # 8PSK
-        "psd_log_16qam.pth": 3,    # 16QAM (additional)
-    }
-    
-    for filename, mod_label in log_file_map.items():
-        filepath = primary_dir / filename
-        if filepath.exists():
-            print(f"  Loading {filepath.name} (mod={mod_label}, log format)...")
-            samples = load_log_pth(str(filepath), mod_label)
-            all_samples.extend(samples)
-            print(f"    → {len(samples)} samples loaded")
-    
-    # Load secondary source (New Dataset directory)
-    secondary_dir = raw_path / config.get("secondary_source", "New_Dataset")
-    if secondary_dir.exists():
-        print(f"\n  Loading secondary source: {secondary_dir}")
-        for pth_file in sorted(secondary_dir.glob("*.pth")):
-            # Determine modulation from filename
-            fname_lower = pth_file.stem.lower()
-            mod_label = None
-            for mod_name, mod_idx in MODULATION_MAP.items():
-                if mod_name in fname_lower:
-                    mod_label = mod_idx
-                    break
-            
-            if mod_label is None:
-                # Try to infer DQPSK
-                if "dqpsk" in fname_lower or "dpsk" in fname_lower:
-                    mod_label = 4
-                else:
-                    print(f"    Skipping {pth_file.name} (unknown modulation)")
-                    continue
-            
-            print(f"  Loading {pth_file.name} (mod={mod_label})...")
-            try:
-                samples = load_log_pth(str(pth_file), mod_label)
-                all_samples.extend(samples)
-                print(f"    → {len(samples)} samples loaded")
-            except Exception as e:
-                print(f"    Error loading {pth_file.name}: {e}")
+        except Exception as e:
+            print(f"    Error loading {pth_file.name}: {e}")
     
     # Convert to numpy arrays
     if not all_samples:
@@ -227,6 +195,57 @@ def load_all_data(raw_dir: str, config: Dict) -> Dict[str, np.ndarray]:
         "mod_labels": mod_labels,
         "snrs": snrs,
     }
+
+
+def bin_snrs(
+    psds: np.ndarray,
+    pu_labels: np.ndarray,
+    mod_labels: np.ndarray,
+    snrs: np.ndarray,
+    target_bins: List[int] = [4, 6, 8, 10, 12, 14, 16, 18, 20],
+    tolerance: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map raw SNR values to the nearest specified bin and filter out-of-range samples.
+    
+    Args:
+        psds: PSD array of shape (N, 192).
+        pu_labels: PU labels.
+        mod_labels: Modulation labels.
+        snrs: Raw continuous SNR values.
+        target_bins: List of specified SNR bins.
+        tolerance: Maximum allowed distance to the nearest bin.
+        
+    Returns:
+        Filtered and binned arrays.
+    """
+    bins = np.array(target_bins)
+    binned_snrs = []
+    keep_indices = []
+    
+    for i, snr in enumerate(snrs):
+        # Find nearest bin
+        distances = np.abs(bins - snr)
+        nearest_idx = np.argmin(distances)
+        min_dist = distances[nearest_idx]
+        
+        if min_dist <= tolerance:
+            binned_snrs.append(bins[nearest_idx])
+            keep_indices.append(i)
+            
+    keep_indices = np.array(keep_indices)
+    
+    if len(keep_indices) == 0:
+        print("  Warning: No samples left after SNR binning!")
+        return np.array([]), np.array([]), np.array([]), np.array([])
+        
+    print(f"  Binned SNR: kept {len(keep_indices)}/{len(snrs)} samples")
+    
+    return (
+        psds[keep_indices],
+        pu_labels[keep_indices],
+        mod_labels[keep_indices],
+        np.array(binned_snrs, dtype=np.float32),
+    )
 
 
 def remove_non_finite(
@@ -268,8 +287,9 @@ def stratified_split(
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = 42,
+    stratify_by: str = "modulation_pu",
 ) -> Dict[str, Dict[str, np.ndarray]]:
-    """Perform stratified train/val/test split based on SNR bins.
+    """Perform stratified train/val/test split.
     
     Args:
         psds: PSD array of shape (N, 192).
@@ -280,13 +300,22 @@ def stratified_split(
         val_ratio: Validation set ratio.
         test_ratio: Test set ratio.
         seed: Random seed for reproducibility.
+        stratify_by: Split key strategy. Supported values are ``modulation_pu``
+            (default) and ``snr``.
         
     Returns:
         Dictionary with 'train', 'val', 'test' splits.
     """
-    # Create stratification key combining SNR bin and modulation
-    snr_bins = np.round(snrs / 2) * 2  # Round to nearest even for binning
-    stratify_key = snr_bins * 10 + mod_labels  # Composite key
+    if stratify_by == "snr":
+        # Coarse SNR bucket so the split remains stable on wider SNR ranges.
+        snr_edges = np.quantile(snrs, [0.2, 0.4, 0.6, 0.8])
+        snr_bins = np.digitize(snrs, snr_edges, right=True)
+        stratify_key = snr_bins * 100 + mod_labels * 2 + pu_labels
+    else:
+        # The previous SNR-only key was too fine-grained for the new raw data
+        # and could fall back to random splitting. Modulation + PU keeps every
+        # class represented while still balancing the binary occupancy target.
+        stratify_key = mod_labels * 2 + pu_labels
     
     # First split: train vs (val + test)
     val_test_ratio = val_ratio + test_ratio
@@ -395,7 +424,7 @@ def apply_scaler(
 def compute_class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor:
     """Compute class weights for imbalanced classification.
     
-    Formula: w_c = N_total / (2 * N_c)
+    Formula: w_c = N_total / (num_classes * N_c)
     
     Args:
         labels: Array of class labels.
@@ -409,7 +438,7 @@ def compute_class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor:
     for c in range(num_classes):
         n_c = (labels == c).sum()
         if n_c > 0:
-            weights.append(n_total / (2.0 * n_c))
+            weights.append(n_total / (float(num_classes) * n_c))
         else:
             weights.append(1.0)
     return torch.tensor(weights, dtype=torch.float32)
